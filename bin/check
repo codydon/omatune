@@ -1,0 +1,65 @@
+#!/usr/bin/bash
+# Runs every check OmaTune has. CI runs this too; checks that need Omarchy
+# or tools that aren't installed are skipped with a note, not failed.
+set -uo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+
+failed=0
+pass() { printf '  ok    %s\n' "$1"; }
+fail() { printf '  FAIL  %s\n' "$1"; failed=1; }
+skip() { printf '  skip  %s\n' "$1"; }
+
+echo "OmaTune checks"
+
+if node tests/model-test.js > /dev/null; then pass "Model.js unit tests"; else fail "Model.js unit tests (run: node tests/model-test.js)"; fi
+
+if bash -n ytm-backend; then pass "ytm-backend syntax"; else fail "ytm-backend syntax"; fi
+
+if command -v shellcheck > /dev/null; then
+  if shellcheck -S warning ytm-backend bin/check; then pass "shellcheck"; else fail "shellcheck"; fi
+else
+  skip "shellcheck (not installed)"
+fi
+
+if jq -e '.id == "codydon.omatune" and .schemaVersion == 1' manifest.json > /dev/null; then
+  pass "manifest.json parses and has the right id"
+else
+  fail "manifest.json"
+fi
+
+if command -v omarchy > /dev/null; then
+  if omarchy plugin validate . > /dev/null; then pass "omarchy plugin validate"; else fail "omarchy plugin validate"; fi
+else
+  skip "omarchy plugin validate (not on Omarchy)"
+fi
+
+# Every Text-like QML item must pin textFormat (see CONTRIBUTING.md).
+missing=$(python3 - <<'PY'
+import re, glob
+for f in sorted(glob.glob('*.qml')):
+    src = open(f).read()
+    for m in re.finditer(r'\b(Text|Label|TextEdit|StyledText)\s*\{', src):
+        i, depth = m.end(), 1
+        while i < len(src) and depth:
+            depth += (src[i] == '{') - (src[i] == '}'); i += 1
+        if 'textFormat:' not in src[m.end():i]:
+            print(f"{f}:{src[:m.start()].count(chr(10)) + 1}")
+PY
+)
+if [[ -z $missing ]]; then pass "every Text has textFormat"; else fail "Text without textFormat: $missing"; fi
+
+# Agent-instruction files must never be committed. Only tracked files count,
+# so a local, gitignored AGENTS.md is fine.
+if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+  agents=$(git ls-files | grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|GEMINI\.md|REVIEW\.md|SKILL\.md|\.claude/|\.cursor/|\.codex/|\.gemini/|\.agents/)' || true)
+  if [[ -z $agents ]]; then pass "no agent files committed"; else fail "agent files are tracked: $agents"; fi
+  big=$(git ls-files -z | xargs -0 -r find 2>/dev/null -maxdepth 0 -type f -size +512k ! -name preview.png || true)
+  if [[ -z $big ]]; then pass "no tracked file over 512 KiB"; else fail "files over 512 KiB: $big"; fi
+  links=$(git ls-files -s | awk '$1 == "120000" { print $4 }')
+  if [[ -z $links ]]; then pass "no symlinks"; else fail "symlinks are tracked: $links"; fi
+else
+  skip "git checks (not a git checkout)"
+fi
+
+if (( failed )); then echo "Some checks failed."; exit 1; fi
+echo "All checks passed."

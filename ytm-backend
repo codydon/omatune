@@ -1,0 +1,209 @@
+#!/usr/bin/bash
+# YouTube Music backend for the codydon.omatune plugin.
+#
+# Talks to YouTube Music's InnerTube API anonymously (the WEB_REMIX client, the
+# same one music.youtube.com uses when you are signed out) for search and
+# radio, and owns the lifecycle of the mpv process that plays audio. Stream
+# resolution, signature deobfuscation and PoTokens are left to yt-dlp, which
+# mpv calls through its ytdl_hook.
+#
+#   ytm-backend search <query>     -> {"ok":true,"tracks":[...]}
+#   ytm-backend radio <videoId>    -> {"ok":true,"tracks":[...]}
+#   ytm-backend start              -> {"ok":true,"socket":"..."}
+#   ytm-backend stop               -> {"ok":true}
+#
+# Every reply is one line of JSON on stdout, including failures, and the exit
+# status is 0 unless the reply itself could not be written.
+set -euo pipefail
+umask 077
+export LC_ALL=C
+
+readonly CURL=/usr/bin/curl
+readonly JQ=/usr/bin/jq
+readonly MPV=/usr/bin/mpv
+readonly YTDLP=/usr/bin/yt-dlp
+readonly SETSID=/usr/bin/setsid
+readonly HEAD=/usr/bin/head
+
+readonly API=https://music.youtube.com/youtubei/v1
+readonly CLIENT_NAME=WEB_REMIX
+readonly CLIENT_VERSION=1.20250101.01.00
+# "Songs" filter for search; without it results mix videos, albums and artists.
+readonly SONGS_PARAMS='EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D'
+
+readonly MAX_RESPONSE=$((4 * 1024 * 1024))
+readonly MAX_QUERY=200
+readonly MAX_TRACKS=40
+
+: "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}"
+readonly RUNTIME_DIR="$XDG_RUNTIME_DIR/codydon-omatune"
+readonly SOCKET="$RUNTIME_DIR/mpv.sock"
+readonly PID_FILE="$RUNTIME_DIR/mpv.pid"
+readonly LOG_FILE="$RUNTIME_DIR/mpv.log"
+
+reply_error() {
+  "$JQ" -cn --arg e "$1" '{ok: false, error: $e}'
+  exit 0
+}
+
+ensure_runtime_dir() {
+  install -d -m 700 -- "$RUNTIME_DIR"
+  chmod 700 -- "$RUNTIME_DIR"
+  [[ -O $RUNTIME_DIR && ! -L $RUNTIME_DIR ]] || reply_error "The runtime directory is not owned by you."
+}
+
+# POST a JSON body (read from stdin) to an InnerTube endpoint. The response is
+# capped at the producer: head reads one byte past the limit so an oversized
+# reply is detected instead of silently truncated into invalid JSON.
+innertube() {
+  local endpoint=$1 body
+  body=$("$CURL" -q --silent --show-error --fail --proto '=https' \
+      --max-time 15 --connect-timeout 5 --max-filesize "$MAX_RESPONSE" \
+      -H 'Content-Type: application/json' \
+      -H 'Origin: https://music.youtube.com' \
+      --data-binary @- -- "$API/$endpoint?prettyPrint=false" \
+    | "$HEAD" -c $((MAX_RESPONSE + 1))) || return 1
+  (( ${#body} <= MAX_RESPONSE )) || return 1
+  printf '%s' "$body"
+}
+
+context_json() {
+  "$JQ" -cn --arg name "$CLIENT_NAME" --arg ver "$CLIENT_VERSION" \
+    '{client: {clientName: $name, clientVersion: $ver, hl: "en", gl: "US"}}'
+}
+
+valid_video_id() {
+  [[ $1 =~ ^[A-Za-z0-9_-]{11}$ ]]
+}
+
+# Shared jq helpers: every string is stripped of control characters and
+# capped, every id is shape-checked, and the list is capped, so the QML side
+# receives a small, strictly shaped document whatever YouTube sends.
+readonly JQ_HELPERS='
+  def clean($n): tostring | gsub("[\\x00-\\x1f\\x7f\\x{202a}-\\x{202e}\\x{2066}-\\x{2069}]"; "") | .[0:$n];
+  def okid: type == "string" and test("^[A-Za-z0-9_-]{11}$");
+  def okdur: if type == "string" and test("^[0-9]{1,2}(:[0-9]{2}){1,2}$") then . else "" end;
+'
+
+cmd_search() {
+  local query=${1:-}
+  [[ -n $query ]] || reply_error "Type something to search for."
+  (( ${#query} <= MAX_QUERY )) || reply_error "That search is too long."
+  [[ $query != *[[:cntrl:]]* ]] || reply_error "That search has characters YouTube can't take."
+
+  local response
+  response=$("$JQ" -cn --argjson ctx "$(context_json)" --arg q "$query" --arg p "$SONGS_PARAMS" \
+      '{context: $ctx, query: $q, params: $p}' \
+    | innertube search) || reply_error "Couldn't reach YouTube Music. Check your connection, then search again."
+
+  # Songs are musicResponsiveListItemRenderer rows: column 0 is the title,
+  # column 1 is "Artist • Album • 3:45" split into runs.
+  printf '%s' "$response" | "$JQ" -c --argjson max "$MAX_TRACKS" "$JQ_HELPERS"'
+    [ .. | objects | select(has("musicResponsiveListItemRenderer")) | .musicResponsiveListItemRenderer
+      | { id: .playlistItemData.videoId,
+          title: (.flexColumns[0].musicResponsiveListItemFlexColumnRenderer.text.runs // [] | map(.text) | join("")),
+          meta: (.flexColumns[1].musicResponsiveListItemFlexColumnRenderer.text.runs // [] | map(.text) | join("") | split(" • ")) }
+      | select(.id | okid)
+      | { id, title: (.title | clean(200)),
+          artist: ((.meta[0] // "") | clean(120)),
+          album: (if (.meta | length) > 2 then .meta[1] | clean(120) else "" end),
+          duration: ((.meta[-1] // "") | okdur) } ]
+    | reduce .[] as $t ([]; if any(.[]; .id == $t.id) then . else . + [$t] end)
+    | .[0:$max]
+    | {ok: true, tracks: .}' 2>/dev/null || reply_error "YouTube Music answered with something unexpected. Try again in a moment."
+}
+
+cmd_radio() {
+  local id=${1:-}
+  valid_video_id "$id" || reply_error "That isn't a YouTube video id."
+
+  local response
+  response=$("$JQ" -cn --argjson ctx "$(context_json)" --arg id "$id" \
+      '{context: $ctx, videoId: $id, playlistId: ("RDAMVM" + $id), isAudioOnly: true}' \
+    | innertube next) || reply_error "Couldn't load a radio for this song. Check your connection, then try again."
+
+  printf '%s' "$response" | "$JQ" -c --argjson max "$MAX_TRACKS" "$JQ_HELPERS"'
+    [ .. | objects | select(has("playlistPanelVideoRenderer")) | .playlistPanelVideoRenderer
+      | select(.videoId | okid)
+      | { id: .videoId,
+          title: (.title.runs // [] | map(.text) | join("") | clean(200)),
+          artist: ((.longBylineText.runs // [] | map(.text) | join("") | split(" • ")[0] // "") | clean(120)),
+          album: "",
+          duration: ((.lengthText.runs[0].text // "") | okdur) } ]
+    | reduce .[] as $t ([]; if any(.[]; .id == $t.id) then . else . + [$t] end)
+    | .[0:$max]
+    | {ok: true, tracks: .}' 2>/dev/null || reply_error "YouTube Music answered with something unexpected. Try again in a moment."
+}
+
+# The pid file holds "pid starttime" so a recycled pid is never mistaken for
+# our mpv, and the cmdline check makes sure it is the mpv on our socket.
+mpv_pid() {
+  local pid start actual
+  [[ -f $PID_FILE && ! -L $PID_FILE ]] || return 1
+  read -r pid start < "$PID_FILE" || return 1
+  [[ $pid =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] || return 1
+  actual=$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null) || return 1
+  [[ $actual == "$start" ]] || return 1
+  tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | grep -qxF -- "--input-ipc-server=$SOCKET" || return 1
+  printf '%s' "$pid"
+}
+
+cmd_start() {
+  ensure_runtime_dir
+  if mpv_pid > /dev/null; then
+    "$JQ" -cn --arg s "$SOCKET" '{ok: true, socket: $s, started: false}'
+    return
+  fi
+
+  rm -f -- "$SOCKET" "$PID_FILE"
+  # setsid puts mpv in its own session so music keeps playing when the shell
+  # restarts; the Service reconnects to the socket when it comes back.
+  "$SETSID" "$MPV" \
+    --idle=yes --no-video --force-window=no --no-terminal \
+    --input-ipc-server="$SOCKET" \
+    --ytdl-format='bestaudio/best' \
+    --script-opts="ytdl_hook-ytdl_path=$YTDLP" \
+    --prefetch-playlist=yes --cache=yes \
+    --title='YouTube Music' \
+    --log-file="$LOG_FILE" \
+    < /dev/null > /dev/null 2>&1 &
+  local pid=$!
+  disown "$pid" 2>/dev/null || true
+
+  local start
+  start=$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null) || reply_error "mpv exited as soon as it started. Check $LOG_FILE."
+  printf '%s %s\n' "$pid" "$start" > "$PID_FILE"
+
+  # Wait (up to 3s) for mpv to create its IPC socket.
+  local i
+  for (( i = 0; i < 30; i++ )); do
+    [[ -S $SOCKET ]] && break
+    kill -0 "$pid" 2>/dev/null || reply_error "mpv exited as soon as it started. Check $LOG_FILE."
+    sleep 0.1
+  done
+  [[ -S $SOCKET ]] || reply_error "mpv started but never opened its control socket."
+  "$JQ" -cn --arg s "$SOCKET" '{ok: true, socket: $s, started: true}'
+}
+
+cmd_stop() {
+  local pid
+  if pid=$(mpv_pid); then
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+  rm -f -- "$SOCKET" "$PID_FILE"
+  "$JQ" -cn '{ok: true}'
+}
+
+main() {
+  local cmd=${1:-}
+  shift || true
+  case $cmd in
+    search) cmd_search "$@" ;;
+    radio) cmd_radio "$@" ;;
+    start) cmd_start ;;
+    stop) cmd_stop ;;
+    *) reply_error "Unknown command. Use search, radio, start or stop." ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "codydon.omatune",
+  "name": "OmaTune",
+  "version": "0.1.0",
+  "author": "codydon",
+  "license": "MIT",
+  "homepage": "https://github.com/codydon/omatune",
+  "repository": "https://github.com/codydon/omatune",
+  "description": "Search and play YouTube Music without an account, ArchiveTune style: anonymous InnerTube search, automatic song radio, and playback through mpv and yt-dlp.",
+  "keywords": [
+    "omatune",
+    "music",
+    "youtube",
+    "ytmusic",
+    "mpv",
+    "radio"
+  ],
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaTune",
+    "description": "Search YouTube Music and control playback",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "showTitle": true,
+      "maxTitleChars": 28,
+      "autoRadio": true
+    },
+    "schema": [
+      {
+        "key": "showTitle",
+        "type": "enum",
+        "label": "Show the song title in the bar",
+        "options": [
+          true,
+          false
+        ],
+        "defaultValue": true
+      },
+      {
+        "key": "maxTitleChars",
+        "type": "integer",
+        "label": "Longest title in the bar (characters)",
+        "min": 8,
+        "max": 80,
+        "step": 1,
+        "defaultValue": 28
+      },
+      {
+        "key": "autoRadio",
+        "type": "enum",
+        "label": "Queue a radio after the song you pick",
+        "options": [
+          true,
+          false
+        ],
+        "defaultValue": true
+      }
+    ]
+  }
+}

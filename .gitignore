@@ -1,0 +1,21 @@
+# Agent-instruction files stay local: the Omarchy marketplace rejects
+# plugins that ship them (omarchy plugin add copies the repo into a folder
+# coding agents auto-discover).
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+REVIEW.md
+.claude/
+.cursor/
+.codex/
+.gemini/
+.agents/
+skills-lock.json
+
+# Local clutter
+node_modules/
+*.log
+*.png
+!preview.png
+*.bak*
+.DS_Store
