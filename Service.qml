@@ -8,8 +8,9 @@ import "Model.js" as Model
 // to mpv. BarWidget and Panel reach it with bar.shell.serviceFor("codydon.omatune").
 //
 // Playback state is not stored here: mpv owns the playlist and this service
-// mirrors it through observe_property on mpv's JSON IPC socket. The backend
-// script does everything that needs the network or a process lifecycle.
+// mirrors it through observe_property on mpv's JSON IPC socket. mpv is a
+// child Process owned by this service, so it stops with the plugin or the
+// shell. Network work runs in short-lived backend Processes.
 Item {
   id: root
 
@@ -18,6 +19,18 @@ Item {
   readonly property string backendPath: decodeURIComponent(String(Qt.resolvedUrl("ytm-backend")).replace(/^file:\/\//, ""))
   readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string socketPath: runtimeDir !== "" ? runtimeDir + "/codydon-omatune/mpv.sock" : ""
+
+  // Children get a minimal, fixed environment rather than the shell's:
+  // a fixed PATH, and only what mpv needs for audio (XDG_RUNTIME_DIR),
+  // MPRIS (the session bus) and yt-dlp's cache (HOME).
+  readonly property var childEnvironment: ({
+    "HOME": Quickshell.env("HOME") || "",
+    "XDG_RUNTIME_DIR": runtimeDir,
+    "DBUS_SESSION_BUS_ADDRESS": Quickshell.env("DBUS_SESSION_BUS_ADDRESS") || "",
+    "PATH": "/usr/bin",
+    "LANG": "C.UTF-8"
+  })
+  readonly property int maxReplyBytes: 262144
 
   // ---- Search
   property string query: ""
@@ -58,7 +71,8 @@ Item {
   // ---------------------------------------------------------------- search
 
   function search(text) {
-    var q = String(text || "").trim()
+    // Same bounds for the panel and for IPC callers.
+    var q = String(text || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 200)
     if (q === "") { results = []; searchError = ""; return }
     query = q
     searching = true
@@ -149,11 +163,20 @@ Item {
     send(["seek", Math.min(s, Math.max(0, duration)), "absolute"])
   }
 
+  // Asks mpv to quit, then escalates: TERM after 2 s, KILL after 4 s.
   function stop() {
     pending = []
     radioToken++
     radioLoading = false
-    runBackend(["stop"], function() {})
+    connectRetry.stop()
+    starting = false
+    if (playerProc.running) {
+      stopping = true
+      writeCommand(["quit"])
+      playerKill.stage = 0
+      playerKill.restart()
+    }
+    dropSocket()
     resetPlayback()
   }
 
@@ -184,17 +207,11 @@ Item {
   function ensureStarted() {
     if (starting || sockConnected) return
     starting = true
-    runBackend(["start"], function(reply) {
-      if (!reply.ok) {
-        root.starting = false
-        root.pending = []
-        root.lastError = reply.error
-        return
-      }
-      root.connectAttempts = 0
-      root.connectSocket()
-      connectRetry.restart()
-    })
+    stopping = false
+    lastError = ""
+    connectAttempts = 0
+    if (!playerProc.running) playerProc.running = true
+    connectRetry.restart()
   }
 
   function connectSocket() {
@@ -297,8 +314,47 @@ Item {
     }
   }
 
-  // mpv creates its socket a moment after the backend reports it started,
-  // so try a few times before giving up.
+  // ---------------------------------------------------------------- player
+
+  property bool stopping: false
+
+  // `ytm-backend player` prepares the runtime directory and execs mpv, so
+  // this Process's pid is mpv's. No detaching and no pid file: the handle
+  // is the identity, and mpv goes away with this service.
+  Process {
+    id: playerProc
+    command: ["/usr/bin/bash", root.backendPath, "player"]
+    clearEnvironment: true
+    environment: root.childEnvironment
+
+    onExited: function(code) {
+      playerKill.stop()
+      var expected = root.stopping
+      root.stopping = false
+      root.starting = false
+      root.pending = []
+      connectRetry.stop()
+      root.dropSocket()
+      root.resetPlayback()
+      if (!expected)
+        root.lastError = "The player stopped unexpectedly. Check that mpv and yt-dlp are installed, then play the song again."
+    }
+  }
+
+  Timer {
+    id: playerKill
+    property int stage: 0
+    interval: 2000
+    repeat: true
+    onTriggered: {
+      if (!playerProc.running) { playerKill.stop(); return }
+      playerProc.signal(playerKill.stage === 0 ? 15 : 9)
+      if (++playerKill.stage > 1) playerKill.stop()
+    }
+  }
+
+  // mpv creates its socket a moment after it starts, so try a few times
+  // before giving up.
   Timer {
     id: connectRetry
     interval: 250
@@ -310,7 +366,10 @@ Item {
         connectRetry.stop()
         root.starting = false
         root.pending = []
-        root.lastError = "mpv started but its control socket never answered. Run ytm-backend start in a terminal to see why."
+        root.lastError = playerProc.running
+          ? "The player started but never answered. Stop it, then play the song again."
+          : "Couldn't start the player. Check that mpv is installed (omarchy pkg add mpv), then try again."
+        if (playerProc.running) root.stop()
         return
       }
       root.connectSocket()
@@ -329,8 +388,10 @@ Item {
   // ---------------------------------------------------------------- backend
 
   // One Process per call, so a slow search can never deliver its output into
-  // a newer call. Each run has a watchdog: Process emits nothing at all when
-  // the binary is missing.
+  // a newer call. Each call runs under `timeout -k`, which kills the whole
+  // process group (bash, curl, jq, head) at the deadline, and output is read
+  // in raw chunks with a byte budget instead of being collected whole. The
+  // helper already caps what it prints; this is the second fence.
   Component {
     id: backendRun
 
@@ -338,47 +399,74 @@ Item {
       id: run
       property var callback: null
       property bool finished: false
+      property bool overflow: false
+      property string buf: ""
 
-      function finish(text) {
+      clearEnvironment: true
+      environment: root.childEnvironment
+
+      function finish(reply) {
         if (finished) return
         finished = true
         watchdog.stop()
-        var reply = Model.parseReply(text)
         if (callback) callback(reply)
-        Qt.callLater(function() { run.destroy() })
       }
 
-      stdout: StdioCollector {
-        id: collector
-        onStreamFinished: run.finish(collector.text)
+      function terminate() {
+        if (!run.running) return
+        run.signal(15)
+        killTimer.start()
+      }
+
+      stdout: SplitParser {
+        splitMarker: ""
+        onRead: function(chunk) {
+          if (run.overflow) return
+          run.buf += chunk
+          if (run.buf.length > root.maxReplyBytes) {
+            run.overflow = true
+            run.buf = ""
+            run.terminate()
+          }
+        }
       }
 
       onExited: function(code) {
-        Qt.callLater(function() { if (!run.finished) run.finish(collector.text) })
+        killTimer.stop()
+        run.finish(run.overflow
+          ? { ok: false, error: "The helper script returned too much data. Try again." }
+          : Model.parseReply(run.buf))
+        run.buf = ""
+        Qt.callLater(function() { run.destroy() })
       }
 
       property Timer watchdog: Timer {
         interval: 30000
         running: true
         onTriggered: {
-          run.running = false
-          run.finish('{"ok":false,"error":"The helper script took too long. Check your connection, then try again."}')
+          run.finish({ ok: false, error: "The helper script took too long. Check your connection, then try again." })
+          run.terminate()
         }
+      }
+
+      property Timer killTimer: Timer {
+        interval: 2000
+        onTriggered: if (run.running) run.signal(9)
       }
     }
   }
 
   function runBackend(args, callback) {
     var run = backendRun.createObject(root, {
-      command: [backendPath].concat(args),
+      command: ["/usr/bin/timeout", "-k", "2", "--", "25", "/usr/bin/bash", backendPath].concat(args),
       callback: callback
     })
     if (!run) { callback({ ok: false, error: "Couldn't start the helper script." }); return }
     run.running = true
   }
 
-  // Music keeps playing across shell restarts (mpv runs in its own session),
-  // so pick the existing player back up if it is there.
-  Component.onCompleted: connectSocket()
-  Component.onDestruction: dropSocket()
+  Component.onDestruction: {
+    dropSocket()
+    if (playerProc.running) playerProc.signal(15)
+  }
 }

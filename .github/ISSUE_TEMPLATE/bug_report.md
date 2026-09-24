@@ -25,10 +25,10 @@ log=$(ls -t $XDG_RUNTIME_DIR/quickshell/by-id/*/log.log | head -1); grep -i omat
 ```
 
 </details>
-<details><summary>mpv log (playback problems)</summary>
+<details><summary>mpv output (playback problems)</summary>
 
 ```
-tail -40 $XDG_RUNTIME_DIR/codydon-omatune/mpv.log
+mpv --no-video https://music.youtube.com/watch?v=<id of a song that fails>
 ```
 
 </details>

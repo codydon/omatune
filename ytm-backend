@@ -3,17 +3,17 @@
 #
 # Talks to YouTube Music's InnerTube API anonymously (the WEB_REMIX client, the
 # same one music.youtube.com uses when you are signed out) for search and
-# radio, and owns the lifecycle of the mpv process that plays audio. Stream
+# radio, and execs the mpv process that plays audio. Stream
 # resolution, signature deobfuscation and PoTokens are left to yt-dlp, which
 # mpv calls through its ytdl_hook.
 #
 #   ytm-backend search <query>     -> {"ok":true,"tracks":[...]}
 #   ytm-backend radio <videoId>    -> {"ok":true,"tracks":[...]}
-#   ytm-backend start              -> {"ok":true,"socket":"..."}
-#   ytm-backend stop               -> {"ok":true}
+#   ytm-backend player             -> execs mpv (never returns on success)
 #
-# Every reply is one line of JSON on stdout, including failures, and the exit
-# status is 0 unless the reply itself could not be written.
+# search and radio print exactly one line of JSON on stdout, including on
+# failure. The Service runs every call under `timeout -k`, so the whole
+# process group (curl, jq, head) is killed at the deadline.
 set -euo pipefail
 umask 077
 export LC_ALL=C
@@ -22,7 +22,6 @@ readonly CURL=/usr/bin/curl
 readonly JQ=/usr/bin/jq
 readonly MPV=/usr/bin/mpv
 readonly YTDLP=/usr/bin/yt-dlp
-readonly SETSID=/usr/bin/setsid
 readonly HEAD=/usr/bin/head
 
 readonly API=https://music.youtube.com/youtubei/v1
@@ -38,8 +37,9 @@ readonly MAX_TRACKS=40
 : "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}"
 readonly RUNTIME_DIR="$XDG_RUNTIME_DIR/codydon-omatune"
 readonly SOCKET="$RUNTIME_DIR/mpv.sock"
-readonly PID_FILE="$RUNTIME_DIR/mpv.pid"
-readonly LOG_FILE="$RUNTIME_DIR/mpv.log"
+# mpv-mpris gives media keys and the Omarchy media widget. Loaded
+# explicitly because --no-config skips the system script directory.
+readonly MPRIS_SCRIPT=/etc/mpv/scripts/mpris.so
 
 reply_error() {
   "$JQ" -cn --arg e "$1" '{ok: false, error: $e}'
@@ -135,63 +135,23 @@ cmd_radio() {
     | {ok: true, tracks: .}' 2>/dev/null || reply_error "YouTube Music answered with something unexpected. Try again in a moment."
 }
 
-# The pid file holds "pid starttime" so a recycled pid is never mistaken for
-# our mpv, and the cmdline check makes sure it is the mpv on our socket.
-mpv_pid() {
-  local pid start actual
-  [[ -f $PID_FILE && ! -L $PID_FILE ]] || return 1
-  read -r pid start < "$PID_FILE" || return 1
-  [[ $pid =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] || return 1
-  actual=$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null) || return 1
-  [[ $actual == "$start" ]] || return 1
-  tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | grep -qxF -- "--input-ipc-server=$SOCKET" || return 1
-  printf '%s' "$pid"
-}
-
-cmd_start() {
+# Replaces this script with mpv, so the plugin's Process owns mpv directly:
+# no detaching, no pid file, and mpv stops when the plugin or shell stops.
+# mpv listens on a socket in the 0700 runtime directory; it replaces a stale
+# socket file itself.
+cmd_player() {
   ensure_runtime_dir
-  if mpv_pid > /dev/null; then
-    "$JQ" -cn --arg s "$SOCKET" '{ok: true, socket: $s, started: false}'
-    return
-  fi
-
-  rm -f -- "$SOCKET" "$PID_FILE"
-  # setsid puts mpv in its own session so music keeps playing when the shell
-  # restarts; the Service reconnects to the socket when it comes back.
-  "$SETSID" "$MPV" \
-    --idle=yes --no-video --force-window=no --no-terminal \
+  [[ ! -e $SOCKET || -S $SOCKET ]] || reply_error "Something that isn't a socket is in the way at $SOCKET."
+  local extra=()
+  [[ -f $MPRIS_SCRIPT ]] && extra+=(--scripts="$MPRIS_SCRIPT")
+  exec "$MPV" "${extra[@]}" \
+    --idle=yes --no-video --force-window=no --no-terminal --no-config \
     --input-ipc-server="$SOCKET" \
     --ytdl-format='bestaudio/best' \
     --script-opts="ytdl_hook-ytdl_path=$YTDLP" \
     --prefetch-playlist=yes --cache=yes \
-    --title='YouTube Music' \
-    --log-file="$LOG_FILE" \
-    < /dev/null > /dev/null 2>&1 &
-  local pid=$!
-  disown "$pid" 2>/dev/null || true
-
-  local start
-  start=$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null) || reply_error "mpv exited as soon as it started. Check $LOG_FILE."
-  printf '%s %s\n' "$pid" "$start" > "$PID_FILE"
-
-  # Wait (up to 3s) for mpv to create its IPC socket.
-  local i
-  for (( i = 0; i < 30; i++ )); do
-    [[ -S $SOCKET ]] && break
-    kill -0 "$pid" 2>/dev/null || reply_error "mpv exited as soon as it started. Check $LOG_FILE."
-    sleep 0.1
-  done
-  [[ -S $SOCKET ]] || reply_error "mpv started but never opened its control socket."
-  "$JQ" -cn --arg s "$SOCKET" '{ok: true, socket: $s, started: true}'
-}
-
-cmd_stop() {
-  local pid
-  if pid=$(mpv_pid); then
-    kill -TERM "$pid" 2>/dev/null || true
-  fi
-  rm -f -- "$SOCKET" "$PID_FILE"
-  "$JQ" -cn '{ok: true}'
+    --title='OmaTune' \
+    --msg-level=all=no
 }
 
 main() {
@@ -200,9 +160,8 @@ main() {
   case $cmd in
     search) cmd_search "$@" ;;
     radio) cmd_radio "$@" ;;
-    start) cmd_start ;;
-    stop) cmd_stop ;;
-    *) reply_error "Unknown command. Use search, radio, start or stop." ;;
+    player) cmd_player ;;
+    *) reply_error "Unknown command. Use search, radio or player." ;;
   esac
 }
 

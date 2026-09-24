@@ -41,7 +41,8 @@ include:
    log=$(ls -t $XDG_RUNTIME_DIR/quickshell/by-id/*/log.log | head -1)
    grep -i omatune "$log" | tail -40
    ```
-4. For playback problems, the end of `$XDG_RUNTIME_DIR/codydon-omatune/mpv.log`.
+4. For playback problems, the output of
+   `mpv --no-video https://music.youtube.com/watch?v=<id>` for a song that fails.
 5. For search or radio problems, the backend output:
    `./ytm-backend search "your query" | head -c 2000`.
 
@@ -105,7 +106,7 @@ Panel / BarWidget ──► Service.qml ──► ytm-backend ──► music.yo
 | `BarWidget.qml` | The bar button (one per monitor), IPC target `codydon.omatune`, hosts the panel |
 | `Panel.qml` | The popup: now playing, seek, transport, search, results and queue |
 | `Model.js` | Pure logic with no Qt or I/O: parsing, cleaning, mpv commands, queue mapping. Unit-tested under node |
-| `ytm-backend` | Bash: `search`, `radio <id>`, `start`, `stop`. Prints one JSON line |
+| `ytm-backend` | Bash: `search`, `radio <id>` (one JSON line each), and `player`, which execs mpv |
 | `tests/` | Node tests for `Model.js` |
 | `bin/check` | Every local check in one command |
 
@@ -114,8 +115,10 @@ Two design points that surprise people:
 - **mpv's playlist is the queue.** The service doesn't keep its own list; it
   mirrors mpv's `playlist` property. `Service.meta` only maps a video id to
   its title and artist.
-- **The backend is the only thing that touches the network** or starts
-  processes. The QML talks to mpv directly over its socket for playback.
+- **The backend is the only thing that touches the network.** mpv is a
+  child `Process` the service owns (`ytm-backend player` execs it), and the
+  QML talks to it over its socket. Never detach it: it must stop with the
+  plugin.
 
 ## Coding rules
 
@@ -131,9 +134,13 @@ blocked real plugins, so pull requests are checked against them.
   `Model.plain()` first.
 - Don't set `Image.source` from remote URLs, such as thumbnails. That needs a
   bounded download helper, which doesn't exist yet.
-- Every backend call is a **new** `Process` (the `backendRun` component) with
-  a watchdog. Late replies are dropped with a token (`searchToken`,
-  `radioToken`).
+- Every backend call is a **new** `Process` (the `backendRun` component)
+  run under `timeout -k` (which kills the whole process group), with a
+  watchdog, a cleared environment (`childEnvironment`) and a byte-counted
+  `SplitParser`. Never use `StdioCollector`. Late replies are dropped with a
+  token (`searchToken`, `radioToken`).
+- IPC methods that take a value must bound it exactly like the UI does, and
+  may only trigger normal, non-destructive actions.
 - Every connection attempt to mpv is a **new** `Socket` (`connectSocket()`).
   A Quickshell `Socket` that failed once doesn't reconnect.
 - Use `Style.*` and `Color.*` tokens and the first-party `qs.Ui` components;
@@ -186,13 +193,8 @@ omarchy-shell codydon.omatune search "daft punk"
 omarchy-shell codydon.omatune playResult 0
 ```
 
-To test without sound, start the player first and mute it; the plugin reuses
-the running player:
-
-```bash
-./ytm-backend start
-python3 -c 'import socket,os; s=socket.socket(socket.AF_UNIX); s.connect(os.environ["XDG_RUNTIME_DIR"]+"/codydon-omatune/mpv.sock"); s.sendall(b"{\"command\":[\"set_property\",\"volume\",0]}\n")'
-```
+To test without sound, mute your output first:
+`wpctl set-mute @DEFAULT_AUDIO_SINK@ 1` (and `0` to unmute).
 
 For UI changes, attach a screenshot **cropped to the panel**. A wider grab
 also captures whatever window is behind it.

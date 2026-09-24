@@ -15,7 +15,7 @@ music keeps going.
 - Pick a song to play it now and fill the queue with its radio
 - Add songs to the queue, jump around in it, remove songs from it
 - Play/pause, next, back and seek from the panel, the bar or your media keys
-- Background playback that keeps going through shell restarts
+- Background playback with no window, controlled from the bar
 - No account, cookies or API key
 
 ## Requirements
@@ -36,6 +36,10 @@ Keep **yt-dlp** up to date. When YouTube changes something, a yt-dlp update
 is almost always the fix.
 
 ## Install
+
+> **Manual setup:** OmaTune needs `mpv` and `yt-dlp` (and ideally
+> `mpv-mpris`, `jq` and `deno`), which Omarchy doesn't ship by default.
+> Install them first with the command above.
 
 ```bash
 omarchy plugin add https://github.com/codydon/omatune --enable
@@ -60,9 +64,11 @@ omarchy plugin remove codydon.omatune
 omarchy restart shell
 ```
 
-Removing the plugin deletes its folder. The runtime folder
+Removing the plugin deletes its folder and stops mpv with it (the `stop`
+line above just makes it immediate). The runtime folder
 `$XDG_RUNTIME_DIR/codydon-omatune/` is in memory and goes away when you log
-out. Nothing else is left behind.
+out. Nothing else is left behind: OmaTune writes no other files, and the
+packages from Requirements stay installed.
 
 ## Use
 
@@ -142,8 +148,9 @@ Panel / bar ──► Service.qml ──► ytm-backend ──► music.youtube.
 - **yt-dlp** does the fragile work: stream URLs, signature decoding and
   bot-check tokens. The plugin doesn't reimplement any of it, so a yt-dlp
   update keeps it working.
-- **mpv** plays audio in the background in its own session, so music keeps
-  going if the shell restarts; the plugin reconnects when it comes back.
+- **mpv** plays audio with no window. The plugin starts it as its own
+  child process the first time you play something, so it stops with the
+  plugin (or the shell) and never outlives it.
   mpv's playlist *is* the queue.
 
 ### What it touches
@@ -152,10 +159,14 @@ Panel / bar ──► Service.qml ──► ytm-backend ──► music.youtube.
   (search and radio), plus whatever stream URLs yt-dlp resolves for the song
   you play. No other hosts, and no data about you beyond what any signed-out
   visitor sends.
-- **Files:** only `$XDG_RUNTIME_DIR/codydon-omatune/` (the mpv socket, pid
-  file and log), created mode 0700 and readable only by you.
-- **Processes:** one `mpv` (which runs `yt-dlp`), started when you first play
-  something and stopped by **Stop** or `omarchy-shell codydon.omatune stop`.
+- **Files:** only `$XDG_RUNTIME_DIR/codydon-omatune/mpv.sock` (mpv's control
+  socket), in a folder created mode 0700 and readable only by you. No logs,
+  caches or settings files.
+- **Processes:** one `mpv` (which runs `yt-dlp`), owned by the plugin. It
+  starts when you first play something and stops with **Stop**, when the
+  plugin is disabled or removed, or when the shell exits. Search and radio
+  requests run as short-lived `curl` + `jq` helpers with a 25-second limit.
+  All of them get a minimal environment, not your whole shell environment.
 - **Config:** nothing. The plugin never edits `shell.json` or your Hyprland
   config; settings changes go through Omarchy's own settings API.
 
@@ -164,8 +175,9 @@ Panel / bar ──► Service.qml ──► ytm-backend ──► music.youtube.
 | Symptom | Try |
 |---|---|
 | "Couldn't reach YouTube Music" | Check your connection. If YouTube Music isn't available in your region, you may need a VPN. |
-| "Couldn't play …" | `yt-dlp -U` or update the package, then play the song again. Details are in `$XDG_RUNTIME_DIR/codydon-omatune/mpv.log`. |
-| Search works but nothing plays | Run `./ytm-backend start` in the plugin folder to see mpv's error. |
+| "Couldn't play …" | `yt-dlp -U` or update the package, then play the song again. |
+| Search works but nothing plays | Play the song in a terminal to see the real error: `mpv --no-video https://music.youtube.com/watch?v=<id>` |
+| "The player stopped unexpectedly" | Check `mpv --version` and `yt-dlp --version` work, then play the song again. |
 | Widget missing or stale after an update | `omarchy restart shell` |
 | Panel opens on the wrong monitor | Use `omarchy-shell shell toggle codydon.omatune` rather than `… codydon.omatune open`. |
 
@@ -181,9 +193,8 @@ Check the backend on its own:
 - No thumbnails, offline downloads, local playlists or lyrics yet.
 - No access to your personal YouTube Music library (likes, playlists).
   That would need signing in, which this plugin deliberately doesn't do.
-- The queue's song titles aren't kept across a shell restart. The music
-  keeps playing, but songs you haven't seen since the restart show by
-  their mpv title.
+- Restarting the shell stops the music (mpv belongs to the plugin, so it
+  can never be left running on its own).
 
 ## Support
 
