@@ -141,9 +141,15 @@ cmd_radio() {
 # socket file itself.
 cmd_player() {
   ensure_runtime_dir
+  # 0.1.0 kept a log and a pid file here; remove exactly those two names.
+  rm -f -- "$RUNTIME_DIR/mpv.log" "$RUNTIME_DIR/mpv.pid"
   [[ ! -e $SOCKET || -S $SOCKET ]] || reply_error "Something that isn't a socket is in the way at $SOCKET."
   local extra=()
   [[ -f $MPRIS_SCRIPT ]] && extra+=(--scripts="$MPRIS_SCRIPT")
+  # The script runs under LC_ALL=C for byte-exact checks; mpv and yt-dlp
+  # need a UTF-8 locale for titles.
+  unset LC_ALL
+  export LANG=C.UTF-8
   exec "$MPV" "${extra[@]}" \
     --idle=yes --no-video --force-window=no --no-terminal --no-config \
     --input-ipc-server="$SOCKET" \
