@@ -9,7 +9,7 @@ function test(name, fn) {
 }
 
 test("plain strips markup, controls and bidi overrides, then caps", () => {
-  assert.equal(M.plain('<img src="http://x">Song‮ & co\u0007', 100), 'img src="http://x"Song and co')
+  assert.equal(M.plain('<img src="http://x">Song\u202e & co\u0007', 100), 'img src="http://x"Song and co')
   assert.equal(M.plain("Daft Punk & Julian", 100), "Daft Punk and Julian")
   assert.equal(M.plain("abcdef", 3), "abc")
   assert.equal(M.plain(null, 5), "")
