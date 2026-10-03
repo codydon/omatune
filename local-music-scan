@@ -1,0 +1,19 @@
+#!/usr/bin/python3 -I -S
+"""List supported audio files below ~/Music as JSON."""
+import json
+import os
+
+ROOT = os.path.join(os.environ.get("HOME", ""), "Music")
+EXTENSIONS = {".aac", ".aiff", ".alac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".wma"}
+tracks = []
+
+if os.path.isdir(ROOT):
+    for base, dirs, files in os.walk(ROOT, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        for name in sorted(files):
+            path = os.path.join(base, name)
+            if os.path.splitext(name)[1].lower() not in EXTENSIONS or not os.path.isfile(path):
+                continue
+            tracks.append({"path": path, "title": os.path.splitext(name)[0]})
+
+print(json.dumps(tracks, ensure_ascii=True, separators=(",", ":")))

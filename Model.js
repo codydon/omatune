@@ -19,6 +19,7 @@ var MAX_SAVED_QUEUE = 200
 // One argv string can't exceed 128 KiB on Linux; stay well under it.
 var MAX_SAVE_BYTES = 100000
 var CACHE_EXT = /^(webm|m4a)$/
+var LOCAL_EXT = /\.(aac|aiff|alac|flac|m4a|mp3|ogg|opus|wav|wma)$/i
 
 // Control, bidi-override and markup characters are dropped before any string
 // reaches a label, a tooltip or mpv's media title (which MPRIS republishes).
@@ -177,6 +178,24 @@ function parseCache(text) {
   }
 }
 
+function parseLocalLibrary(text) {
+  var data
+  try { data = JSON.parse(String(text || "")) } catch (e) { return { ok: false, error: "Couldn't read the local music scan." } }
+  if (!Array.isArray(data)) return { ok: false, error: "The local music scan returned an unexpected result." }
+  var tracks = []
+  for (var i = 0; i < data.length; i++) {
+    var t = data[i]
+    if (!t || typeof t.path !== "string" || t.path.charAt(0) !== "/" || !LOCAL_EXT.test(t.path)) continue
+    tracks.push({ id: t.path, path: t.path, title: plain(t.title || t.path.split("/").pop(), MAX_TITLE), artist: "", album: "", duration: "", local: true })
+  }
+  return { ok: true, tracks: tracks }
+}
+
+function localFileCommand(track, mode) {
+  if (!track || !track.local || typeof track.path !== "string" || track.path.charAt(0) !== "/" || !LOCAL_EXT.test(track.path)) return null
+  return ["loadfile", track.path, mode === "replace" ? "replace" : "append"]
+}
+
 function cacheMap(tracks) {
   var map = Object.create(null)
   for (var i = 0; i < tracks.length; i++) map[tracks[i].id] = tracks[i]
@@ -272,6 +291,8 @@ function buildQueue(playlist, meta, cacheDir) {
     rows.push({
       index: i,
       id: id,
+      path: !id && typeof entry.filename === "string" && entry.filename.charAt(0) === "/" ? entry.filename : "",
+      local: !id && typeof entry.filename === "string" && entry.filename.charAt(0) === "/" && LOCAL_EXT.test(entry.filename),
       title: known ? known.title : plain(entry.title || entry.filename || "Unknown track", MAX_TITLE),
       artist: known ? known.artist : "",
       album: known ? known.album : "",
@@ -323,6 +344,7 @@ function playbackError(event, track) {
 if (typeof module !== "undefined") {
   module.exports = {
     plain: plain, isVideoId: isVideoId, watchUrl: watchUrl, idFromUrl: idFromUrl,
+    parseLocalLibrary: parseLocalLibrary, localFileCommand: localFileCommand,
     validCacheDir: validCacheDir, sourceFor: sourceFor, parseHistory: parseHistory,
     parseSuggestions: parseSuggestions,
     parseQueue: parseQueue, parseCache: parseCache, cacheMap: cacheMap,

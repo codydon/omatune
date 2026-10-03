@@ -9,7 +9,7 @@ import "Model.js" as Model
 //
 // Keyboard: / search (↓↑ suggestions · tab complete) · j/k move · enter play
 // · a add to queue · q next view
-// (1 results · 2 queue · 3 cached · 4 history) · p play/pause · m mute ·
+// (1 results · 2 queue · 3 local · 4 cached · 5 history) · p play/pause · m mute ·
 // n next · b back · h/l seek · x remove · esc close.
 //
 // BarWidget.qml owns the bar button and injects bar, anchorItem, hostWidget
@@ -28,8 +28,8 @@ Panel {
 
   // Which list is showing. Searching flips to results; with nothing
   // searched the queue is the useful thing to show.
-  readonly property var views: ["results", "queue", "cached", "history"]
-  readonly property var viewNames: ({ results: "RESULTS", queue: "QUEUE", cached: "CACHED", history: "HISTORY" })
+  readonly property var views: ["results", "queue", "local", "cached", "history"]
+  readonly property var viewNames: ({ results: "RESULTS", queue: "QUEUE", local: "LOCAL", cached: "CACHED", history: "HISTORY" })
   property string view: "queue"
   property int cursor: -1
   property int suggestCursor: -1
@@ -39,6 +39,7 @@ Panel {
   readonly property var rows: {
     if (!service) return []
     if (view === "queue") return service.queue
+    if (view === "local") return service.localTracks
     if (view === "cached") return service.cachedTracks
     if (view === "history") return service.history.map(function(q) { return { title: q, query: q } })
     return service.results
@@ -56,6 +57,7 @@ Panel {
 
   function open() {
     root.controller.show()
+    if (service) service.scanLocalMusic()
     if (restoring) view = "queue"
     else if (service && service.results.length > 0 && !hasTrack) view = "results"
     cursor = rows.length > 0 ? Math.max(0, currentQueueIndex()) : -1
@@ -173,14 +175,16 @@ Panel {
   function activate(index) {
     if (!service || index < 0 || index >= rows.length) return
     if (view === "queue") service.playIndex(index)
+    else if (view === "local") service.playLocal(rows[index])
     else if (view === "history") runHistory(rows[index].query)
     else if (view === "cached") service.playCached(index)
     else service.playNow(rows[index])
   }
 
   function addSelected() {
-    if (!service || (view !== "results" && view !== "cached") || cursor < 0 || cursor >= rows.length) return
-    service.enqueue(rows[cursor])
+    if (!service || (view !== "results" && view !== "cached" && view !== "local") || cursor < 0 || cursor >= rows.length) return
+    if (view === "local") service.enqueueLocal(rows[cursor])
+    else service.enqueue(rows[cursor])
   }
 
   function removeSelected() {
@@ -265,7 +269,7 @@ Panel {
         else if (t === "b") root.service.previous()
         else if (t === "a") root.addSelected()
         else if (t === "q") root.cycleView()
-        else if (t >= "1" && t <= "4") root.setView(root.views[Number(t) - 1])
+        else if (t >= "1" && t <= "5") root.setView(root.views[Number(t) - 1])
       }
 
       Column {
@@ -509,6 +513,7 @@ Panel {
                 var size = Model.formatBytes(sv.cacheBytes)
                 return "OFFLINE · " + n + (n === 1 ? " SONG" : " SONGS") + (size ? " · " + size.toUpperCase() : "") + (sv.caching ? " · SAVING" : "")
               }
+              if (root.view === "local") return (sv.localScanning ? "SCANNING · " : "LOCAL MUSIC · ") + sv.localTracks.length + " SONGS"
               if (root.view === "history") return "RECENT SEARCHES · " + sv.history.length
               if (sv.searching) return "SEARCHING"
               return "RESULTS · " + sv.results.length + " SONGS"
@@ -570,6 +575,12 @@ Panel {
                   ? "Songs you listen to for 20 seconds are saved here and play without a connection."
                   : "Offline saving is turned off in the widget settings. Songs saved earlier still show here."
               return ""
+            }
+            if (root.view === "local") {
+              if (sv.localError !== "") return sv.localError
+              if (sv.localScanning) return "Scanning ~/Music…"
+              if (sv.localTracks.length === 0) return "No supported audio files found in ~/Music. Add music there and reopen this panel to rescan."
+              return "Select a song to play it, or press a to add it to the queue."
             }
             if (root.view === "history") {
               if (sv.history.length === 0)

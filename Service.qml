@@ -18,6 +18,7 @@ Item {
 
   readonly property string backendPath: decodeURIComponent(String(Qt.resolvedUrl("ytm-backend")).replace(/^file:\/\//, ""))
   readonly property string storePath: decodeURIComponent(String(Qt.resolvedUrl("ytm-store")).replace(/^file:\/\//, ""))
+  readonly property string localScanPath: decodeURIComponent(String(Qt.resolvedUrl("local-music-scan")).replace(/^file:\/\//, ""))
   readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string socketPath: runtimeDir !== "" ? runtimeDir + "/codydon-omatune/mpv.sock" : ""
 
@@ -93,6 +94,11 @@ Item {
   // ---- Search history
   property var history: []
 
+  // ---- Local library, scanned recursively from ~/Music
+  property var localTracks: []
+  property bool localScanning: false
+  property string localError: ""
+
   // ---- Offline cache
   property var cachedTracks: []
   property string cacheDir: ""
@@ -119,6 +125,34 @@ Item {
 
   function sourceOf(track) {
     return Model.sourceFor(track, cached, cacheDir)
+  }
+
+  function scanLocalMusic() {
+    if (localScanning) return
+    localScanning = true
+    localError = ""
+    startRun(["/usr/bin/timeout", "-k", "2", "--", "20", "/usr/bin/python3", "-I", "-S", localScanPath],
+      Model.parseLocalLibrary, 20, function(reply) {
+        root.localScanning = false
+        if (!reply.ok) { root.localError = reply.error; return }
+        root.localTracks = reply.tracks
+      }, 8388608)
+  }
+
+  function playLocal(track) {
+    var command = Model.localFileCommand(track, "replace")
+    if (!command) return
+    lastError = ""
+    restored = { tracks: [], index: 0, position: 0 }
+    radioToken++
+    radioLoading = false
+    send(command)
+    send(["set_property", "pause", false])
+  }
+
+  function enqueueLocal(track) {
+    var command = Model.localFileCommand(track, "append")
+    if (command) send(command)
   }
 
   // ---------------------------------------------------------------- search
@@ -687,6 +721,7 @@ Item {
       property bool finished: false
       property bool overflow: false
       property string buf: ""
+      property int outputLimit: root.maxReplyBytes
 
       clearEnvironment: true
       environment: root.childEnvironment
@@ -709,7 +744,7 @@ Item {
         onRead: function(chunk) {
           if (run.overflow) return
           run.buf += chunk
-          if (run.buf.length > root.maxReplyBytes) {
+          if (run.buf.length > run.outputLimit) {
             run.overflow = true
             run.buf = ""
             run.terminate()
@@ -751,11 +786,12 @@ Item {
     startRun(["/usr/bin/timeout", "-k", "3", "--", String(seconds), "/usr/bin/python3", "-I", "-S", storePath].concat(args), parse, seconds, callback)
   }
 
-  function startRun(command, parse, seconds, callback) {
+  function startRun(command, parse, seconds, callback, outputLimit) {
     var run = backendRun.createObject(root, {
       command: command,
       parse: parse,
       deadlineMs: (seconds + 5) * 1000,
+      outputLimit: outputLimit || root.maxReplyBytes,
       callback: callback
     })
     if (!run) { callback({ ok: false, error: "Couldn't start the helper script." }); return }
@@ -773,6 +809,7 @@ Item {
       if (reply.ok) root.history = reply.history
     })
     refreshCache()
+    scanLocalMusic()
   }
 
   Component.onDestruction: {

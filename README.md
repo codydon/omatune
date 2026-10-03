@@ -21,6 +21,7 @@ music keeps going.
 - **Offline cache**: songs you listen to are saved (up to a size you pick)
   and play from disk, even without a connection
 - Background playback with no window, controlled from the bar
+- Automatically scans `~/Music` for local audio and plays it through the same queue
 - **Works out of the box on Omarchy**: nothing extra to install
 - No account, cookies or API key
 
@@ -105,10 +106,11 @@ playing.
 |---|---|
 | `/` or `s` | Search |
 | `j` / `k` or arrows | Move through the list |
-| `enter` / `space` | Results: play and start a radio · Queue: jump to it · Cached: play from disk · History: search again |
-| `a` | Add the selected result or cached song to the queue |
-| `q` | Next list: Results → Queue → Cached → History |
-| `1` `2` `3` `4` | Go straight to Results, Queue, Cached or History |
+| `enter` / `space` | Results: play and start a radio · Queue: jump to it · Local: play · Cached: play from disk · History: search again |
+| `a` | Add the selected result, local song or cached song to the queue |
+| `q` | Next list: Results → Queue → Local → Cached → History |
+| `3` | Show the local library scanned from `~/Music` |
+| `1` `2` `3` `4` `5` | Go straight to Results, Queue, Local, Cached or History |
 | `x` | Queue: remove the song · History: forget the search |
 | `p` | Play / pause |
 | `m` | Mute / unmute (the header shows MUTED) |
@@ -231,6 +233,7 @@ Check the backend on its own:
 
 ## Limitations
 
+- The local library scans `~/Music` recursively and supports common audio formats. It is rescanned when the panel opens; local queue entries do not survive a shell restart.
 - No thumbnails, local playlists or lyrics yet.
 - No access to your personal YouTube Music library (likes, playlists).
   That would need signing in, which this plugin deliberately doesn't do.
