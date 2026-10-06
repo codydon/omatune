@@ -107,6 +107,9 @@ playing.
 | `j` / `k` or arrows | Move through the list |
 | `enter` / `space` | Results: play and start a radio · Queue: jump to it · Cached: play from disk · History: search again |
 | `a` | Add the selected result or cached song to the queue |
+| `f` | Search filter: All → Songs → Videos (re-runs the search) |
+| `c` | Clear the search box and the results |
+| `d` | Search YouTube's "Did you mean" suggestion |
 | `q` | Next list: Results → Queue → Cached → History |
 | `1` `2` `3` `4` | Go straight to Results, Queue, Cached or History |
 | `x` | Queue: remove the song · History: forget the search |
@@ -117,8 +120,18 @@ playing.
 | `esc` | In the search box: clear it, then leave it. Anywhere else: close the panel |
 
 With the mouse: click a row to play it, and click the list names to switch.
+The 󰅖 in the search box and **CLEAR RESULTS** clear the search; the **All /
+Songs / Videos** chips pick what to search.
 Middle- or right-clicking a result adds it to the queue, and doing the same
 on a queue row removes it. Songs marked 󰇚 are saved and play from disk.
+
+**What search finds.** **All** (the default) shows YouTube Music's top
+result first, then songs and videos as YouTube ranks them. Many tracks
+(new singles, regional releases, uploads by smaller artists) are only on
+YouTube as videos, so they only show up under All or **Videos**. Videos are
+marked 󰕧 and play as audio like any song. **Songs** narrows the list to
+official releases. Clearing the search goes back to All. When YouTube thinks
+the words are misspelled it offers a "Did you mean" line to click.
 
 **While typing in the search box**, YouTube suggests completions: `↓` / `↑`
 to pick one, `enter` to search it, `tab` to complete it into the box, `esc`
@@ -158,6 +171,8 @@ omarchy-shell codydon.omatune next
 omarchy-shell codydon.omatune previous
 omarchy-shell codydon.omatune stop                # stop and close the player
 omarchy-shell codydon.omatune search "daft punk"
+omarchy-shell codydon.omatune searchFilter videos # all, songs or videos; re-runs the search
+omarchy-shell codydon.omatune clearSearch
 omarchy-shell codydon.omatune playResult 0        # play the first result
 ```
 
@@ -226,6 +241,7 @@ Check the backend on its own:
 
 ```bash
 ./ytm-backend search "daft punk" | jq '.tracks[0]'
+./ytm-backend search "daft punk" videos | jq '.tracks | length'   # all | songs | videos
 ./ytm-backend radio wU26xVT_vBU | jq '.tracks | length'
 ```
 

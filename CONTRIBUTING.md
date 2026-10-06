@@ -44,7 +44,8 @@ include:
 4. For playback problems, the output of
    `mpv --no-video https://music.youtube.com/watch?v=<id>` for a song that fails.
 5. For search or radio problems, the backend output:
-   `./ytm-backend search "your query" | head -c 2000`.
+   `./ytm-backend search "your query" | head -c 2000` (add `songs` or `videos`
+   after the query to try one filter).
 
 Check logs for anything personal (usernames, paths, IP addresses) before
 pasting them. **Found a security issue?** Don't open a public issue; see
@@ -70,11 +71,8 @@ default, anything that needs a daemon besides mpv.
 You need an Omarchy install (Omarchy 4 or later, with the Quickshell bar).
 Running the plugin needs nothing extra: `mpv`, `yt-dlp`, `mpv-mpris`,
 `curl`, `jq` and `python` all ship with Omarchy (`deno` is optional, for
-yt-dlp's JavaScript challenges). For development and checks you also want:
-
-```bash
-omarchy pkg add nodejs shellcheck
-```
+yt-dlp's JavaScript challenges). For development and checks you also want
+the `nodejs` and `shellcheck` packages, from the Omarchy package installer.
 
 Fork the repository and clone your fork somewhere outside the plugin folder:
 
@@ -109,7 +107,7 @@ Panel / BarWidget ──► Service.qml ──► ytm-backend ──► music.yo
 | `BarWidget.qml` | The bar button (one per monitor), IPC target `codydon.omatune`, hosts the panel |
 | `Panel.qml` | The popup: now playing, seek, transport, search, and the Results / Queue / Cached / History views |
 | `Model.js` | Pure logic with no Qt or I/O: parsing, cleaning, mpv commands, queue mapping, history / queue / cache helpers. Unit-tested under node |
-| `ytm-backend` | Bash: `search`, `suggest <query>`, `radio <id>` (one JSON line each), and `player`, which execs mpv |
+| `ytm-backend` | Bash: `search <query> [all\|songs\|videos]`, `suggest <query>`, `radio <id>` (one JSON line each), and `player`, which execs mpv |
 | `ytm-store` | Python: `history-*`, `queue-get` / `queue-put`, `cache-list` / `cache-fetch` / `cache-touch` / `cache-clear` (one JSON line each). The only writer for state and cached audio |
 | `tests/` | Node tests for `Model.js` (`model-test.js`) and store tests in a throwaway HOME (`store-test.sh`, no network) |
 | `bin/check` | Every local check in one command |

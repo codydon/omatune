@@ -7,7 +7,8 @@
 # resolution, signature deobfuscation and PoTokens are left to yt-dlp, which
 # mpv calls through its ytdl_hook.
 #
-#   ytm-backend search <query>     -> {"ok":true,"tracks":[...]}
+#   ytm-backend search <query> [all|songs|videos]
+#                                  -> {"ok":true,"tracks":[...],"didYouMean":"","showingFor":""}
 #   ytm-backend suggest <query>    -> {"ok":true,"suggestions":[...]}
 #   ytm-backend radio <videoId>    -> {"ok":true,"tracks":[...]}
 #   ytm-backend player             -> execs mpv (never returns on success)
@@ -24,12 +25,17 @@ readonly JQ=/usr/bin/jq
 readonly MPV=/usr/bin/mpv
 readonly YTDLP=/usr/bin/yt-dlp
 readonly HEAD=/usr/bin/head
+readonly CAT=/usr/bin/cat
 
 readonly API=https://music.youtube.com/youtubei/v1
 readonly CLIENT_NAME=WEB_REMIX
 readonly CLIENT_VERSION=1.20250101.01.00
-# "Songs" filter for search; without it results mix videos, albums and artists.
+# Search filters. With none, YouTube returns its top result plus a few of
+# each kind (songs, videos, albums, artists); these return one kind only.
+# Many tracks (live cuts, regional releases, uploads by small artists) exist
+# only as videos, so "all" also has to cover videos.
 readonly SONGS_PARAMS='EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D'
+readonly VIDEOS_PARAMS='EgWKAQIQAWoKEAkQChAFEAMQBA%3D%3D'
 
 readonly MAX_RESPONSE=$((4 * 1024 * 1024))
 readonly MAX_QUERY=200
@@ -85,34 +91,114 @@ readonly JQ_HELPERS='
   def clean($n): tostring | gsub("[\\x00-\\x1f\\x7f\\x{202a}-\\x{202e}\\x{2066}-\\x{2069}]"; "") | .[0:$n];
   def okid: type == "string" and test("^[A-Za-z0-9_-]{11}$");
   def okdur: if type == "string" and test("^[0-9]{1,2}(:[0-9]{2}){1,2}$") then . else "" end;
+  def runs_text: (.runs // []) | map(.text // "") | join("");
+'
+
+# POST one search, optionally with a filter. Prints the raw response.
+search_request() {
+  "$JQ" -cn --argjson ctx "$(context_json)" --arg q "$1" --arg p "$2" \
+      '{context: $ctx, query: $q} + (if $p == "" then {} else {params: $p} end)' \
+    | innertube search
+}
+
+# Turns one to three search responses (slurped into an array) into tracks.
+# Rows are musicResponsiveListItemRenderer: column 0 is the title, column 1
+# is "Song • Artist • Album • 3:45" (unfiltered) or "Artist • Album • 3:45"
+# (filtered); videos carry "1.2M views" instead of an album. The top result
+# is a musicCardShelfRenderer with the same text in its subtitle.
+# Order: the top result, then each response's rows in page order (YouTube's
+# ranking), response by response. A track that shows up twice keeps its
+# first place and gains a missing duration or album. $kinds[i] is the kind
+# to assume for an unlabeled row in response i.
+readonly JQ_SEARCH='
+  def counts: test("^[0-9][0-9.,]*[KMB]? (views?|plays?)$");
+  def track($id; $title; $meta; $default):
+    ($meta | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $m
+    | (if ($m[0] // "") | IN("Song", "Video", "Episode", "Podcast", "Artist", "Album", "Single", "EP", "Playlist", "Profile")
+        then $m[0] else "" end) as $label
+    | ($m | if $label != "" then .[1:] else . end | map(select(counts | not))) as $rest
+    | (($rest[-1] // "") | okdur) as $dur
+    | ($rest | if $dur != "" then .[0:-1] else . end) as $rest
+    | (if $label == "Song" then "song" elif $label == "Video" then "video" elif $label != "" then "other"
+       elif any($m[]; test("views?$")) then "video" else $default end) as $kind
+    | select($kind == "song" or $kind == "video")
+    | { id: $id, kind: $kind, title: ($title | clean(200)),
+        artist: (($rest[0] // "") | clean(120)),
+        album: (if $kind == "song" and ($rest | length) > 1 then $rest[1] | clean(120) else "" end),
+        duration: $dur };
+  def row($default):
+    select(.playlistItemData.videoId | okid)
+    | track(.playlistItemData.videoId;
+        (.flexColumns[0].musicResponsiveListItemFlexColumnRenderer.text | runs_text);
+        (.flexColumns[1].musicResponsiveListItemFlexColumnRenderer.text | runs_text | split(" • "));
+        $default);
+  def top:
+    [ .. | objects | select(has("musicCardShelfRenderer")) | .musicCardShelfRenderer
+      | (.title.runs[0].navigationEndpoint.watchEndpoint.videoId) as $id | select($id | okid)
+      | track($id; (.title | runs_text); (.subtitle | runs_text | split(" • ")); "song") ];
+  def rows($default):
+    [ .. | objects | select(has("musicResponsiveListItemRenderer")) | .musicResponsiveListItemRenderer | row($default) ];
+  def correction:
+    first(.. | objects | select(has("didYouMeanRenderer") or has("showingResultsForRenderer"))) // {}
+    | if has("didYouMeanRenderer") then
+        { didYouMean: (.didYouMeanRenderer | (.correctedQueryEndpoint.searchEndpoint.query // (.correctedQuery | runs_text)) | clean(200)) }
+      elif has("showingResultsForRenderer") then
+        { showingFor: (.showingResultsForRenderer | (.correctedQueryEndpoint.searchEndpoint.query // (.correctedQuery | runs_text)) | clean(200)) }
+      else {} end;
+  def card_ids:
+    [ .. | objects | select(has("musicCardShelfRenderer")) | .musicCardShelfRenderer.contents[]?
+      | .musicResponsiveListItemRenderer.playlistItemData.videoId? // empty ];
+  . as $docs | ($kinds | split(",")) as $k
+  | ($docs[0] | card_ids) as $card
+  | [range($docs | length) as $i | $docs[$i] | rows($k[$i] // "song")] as $lists
+  # The rows tucked under the top result are mostly re-uploads of it; they
+  # go after the rest of the first page.
+  | ($docs[0] | top)
+    + (($lists[0] // []) | map(select(.id as $id | $card | index($id) | not)))
+    + (($lists[0] // []) | map(select(.id as $id | $card | index($id))))
+    + ($lists[1:] | add // [])
+  | reduce .[] as $t ([];
+      (map(.id) | index($t.id)) as $i
+      | if $i == null then . + [$t]
+        else .[$i] |= (if .duration == "" then .duration = $t.duration else . end
+                       | if .album == "" and .kind == $t.kind then .album = $t.album else . end) end)
+  | .[0:$max]
+  | {ok: true, tracks: ., didYouMean: "", showingFor: ""} + ($docs[0] | correction)
 '
 
 cmd_search() {
-  local query=${1:-}
+  local query=${1:-} filter=${2:-all}
   [[ -n $query ]] || reply_error "Type something to search for."
   (( ${#query} <= MAX_QUERY )) || reply_error "That search is too long."
   [[ $query != *[[:cntrl:]]* ]] || reply_error "That search has characters YouTube can't take."
 
-  local response
-  response=$("$JQ" -cn --argjson ctx "$(context_json)" --arg q "$query" --arg p "$SONGS_PARAMS" \
-      '{context: $ctx, query: $q, params: $p}' \
-    | innertube search) || reply_error "Couldn't reach YouTube Music. Check your connection, then search again."
+  local main songs="" videos="" kinds songs_fd videos_fd
+  case $filter in
+    all)
+      # The unfiltered search finds the top result and YouTube's ranking
+      # across kinds; the songs and videos searches fill the list and
+      # supply durations the unfiltered rows leave out. All three run at once.
+      exec {songs_fd}< <(search_request "$query" "$SONGS_PARAMS" || true)
+      exec {videos_fd}< <(search_request "$query" "$VIDEOS_PARAMS" || true)
+      main=$(search_request "$query" "") || main=""
+      songs=$("$CAT" <&"$songs_fd") || songs=""
+      videos=$("$CAT" <&"$videos_fd") || videos=""
+      exec {songs_fd}<&- {videos_fd}<&-
+      # jq -s skips empty responses, so list kinds for the ones that remain.
+      kinds=song
+      [[ -n $songs ]] && kinds+=,song
+      [[ -n $videos ]] && kinds+=,video
+      if [[ -z $main ]]; then main=$songs; songs=""; kinds=${kinds#song,}; fi ;;
+    songs) main=$(search_request "$query" "$SONGS_PARAMS") || main=""; kinds=song ;;
+    videos) main=$(search_request "$query" "$VIDEOS_PARAMS") || main=""; kinds=video ;;
+    *) reply_error "Unknown search filter. Use all, songs or videos." ;;
+  esac
+  [[ -n $main ]] || reply_error "Couldn't reach YouTube Music. Check your connection, then search again."
 
-  # Songs are musicResponsiveListItemRenderer rows: column 0 is the title,
-  # column 1 is "Artist • Album • 3:45" split into runs.
-  printf '%s' "$response" | "$JQ" -c --argjson max "$MAX_TRACKS" "$JQ_HELPERS"'
-    [ .. | objects | select(has("musicResponsiveListItemRenderer")) | .musicResponsiveListItemRenderer
-      | { id: .playlistItemData.videoId,
-          title: (.flexColumns[0].musicResponsiveListItemFlexColumnRenderer.text.runs // [] | map(.text) | join("")),
-          meta: (.flexColumns[1].musicResponsiveListItemFlexColumnRenderer.text.runs // [] | map(.text) | join("") | split(" • ")) }
-      | select(.id | okid)
-      | { id, title: (.title | clean(200)),
-          artist: ((.meta[0] // "") | clean(120)),
-          album: (if (.meta | length) > 2 then .meta[1] | clean(120) else "" end),
-          duration: ((.meta[-1] // "") | okdur) } ]
-    | reduce .[] as $t ([]; if any(.[]; .id == $t.id) then . else . + [$t] end)
-    | .[0:$max]
-    | {ok: true, tracks: .}' 2>/dev/null || reply_error "YouTube Music answered with something unexpected. Try again in a moment."
+  # Empty responses are skipped, so a failed side search just means fewer rows.
+  printf '%s\n' "$main" "$songs" "$videos" \
+    | "$JQ" -cs --argjson max "$MAX_TRACKS" --arg kinds "$kinds" "$JQ_HELPERS$JQ_SEARCH" 2>/dev/null \
+    || reply_error "YouTube Music answered with something unexpected. Try again in a moment."
 }
 
 cmd_suggest() {

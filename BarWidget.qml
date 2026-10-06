@@ -105,11 +105,14 @@ BarWidget {
     function next(): void { if (root.service) root.service.next() }
     function previous(): void { if (root.service) root.service.previous() }
     function stop(): void { if (root.service) root.service.stop() }
-    // The two methods that take a value only trigger the widget's normal,
+    // The three methods that take a value only trigger the widget's normal,
     // non-destructive actions, and are bounded the same way as the UI:
-    // the query is capped and cleaned in Service.search, and the index must
+    // the query is capped and cleaned in Service.search, the filter must be
+    // one of all / songs / videos (Model.searchFilter), and the index must
     // be an integer inside the current results.
     function search(query: string): void { if (root.service) root.service.search(String(query).slice(0, 200)) }
+    function searchFilter(filter: string): void { if (root.service) root.service.setSearchFilter(String(filter)) }
+    function clearSearch(): void { if (root.service) root.service.clearSearch() }
     function playResult(index: int): void {
       var i = Number(index)
       if (!root.service || !Number.isInteger(i) || i < 0 || i >= root.service.results.length) return

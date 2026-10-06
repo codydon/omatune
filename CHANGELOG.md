@@ -6,6 +6,33 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-06
+
+### Added
+- Search filters: **All**, **Songs** and **Videos** chips above the results,
+  `f` to cycle them, and the `searchFilter` IPC command. Changing the filter
+  re-runs the search.
+- Clearing a search: the 󰅖 button in the search box, **CLEAR RESULTS**, the
+  `c` key and the `clearSearch` IPC command empty the box and the results.
+- "Did you mean" from YouTube: click the line or press `d` to search the
+  suggested spelling.
+
+### Changed
+- Search now covers videos too. **All** (the default) runs YouTube Music's
+  unfiltered, songs and videos searches at once and shows its top result
+  first, so tracks that are only on YouTube as videos (for example
+  "Otero" by Zzero Sufuri) are found. Videos are marked 󰕧 in the list.
+- Results from the previous search stay visible, dimmed, while a new one
+  loads, and the result count names what was searched (songs, videos or
+  results).
+- A search started from history, a suggestion or IPC fills the search box.
+- The "player didn't start" message no longer carries a package-install
+  command (mpv, mpv-mpris and yt-dlp ship with every Omarchy install), and
+  neither does CONTRIBUTING. The plugin installs with the standard
+  `omarchy plugin add … --enable` and needs no manual setup.
+- New `preview.png`: the panel playing a video-only track, with the search
+  filters and clear button.
+
 ## [0.3.0] - 2026-09-30
 
 ### Added

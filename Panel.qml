@@ -8,7 +8,8 @@ import "Model.js" as Model
 // search box, and one list that shows either search results or the queue.
 //
 // Keyboard: / search (↓↑ suggestions · tab complete) · j/k move · enter play
-// · a add to queue · q next view
+// · a add to queue · f search all/songs/videos · c clear results
+// · d take YouTube's spelling fix · q next view
 // (1 results · 2 queue · 3 cached · 4 history) · p play/pause · m mute ·
 // n next · b back · h/l seek · x remove · esc close.
 //
@@ -56,6 +57,7 @@ Panel {
 
   function open() {
     root.controller.show()
+    if (service && service.query !== "" && searchField.text === "") searchField.text = service.query
     if (restoring) view = "queue"
     else if (service && service.results.length > 0 && !hasTrack) view = "results"
     cursor = rows.length > 0 ? Math.max(0, currentQueueIndex()) : -1
@@ -113,6 +115,30 @@ Panel {
     view = "results"
     cursor = 0
     leaveSearch()
+  }
+
+  // Empties the box and the results, and puts the cursor back in the box
+  // ready for the next search.
+  function clearResults() {
+    if (!service) return
+    service.clearSearch()
+    searchField.text = ""
+    suggestCursor = -1
+    cursor = -1
+    listFlick.contentY = 0
+    if (view !== "results") view = "results"
+    focusSearch()
+  }
+
+  function setFilter(filter) {
+    if (!service) return
+    service.setSearchFilter(filter)
+    if (view !== "results") setView("results")
+  }
+
+  function takeSpellingFix() {
+    if (!service || service.didYouMean === "") return
+    runHistory(service.didYouMean)
   }
 
   function runSuggestion(index) {
@@ -204,11 +230,20 @@ Panel {
     target: root.service
     ignoreUnknownSignals: true
     function onQueryChanged() {
+      if (root.service.query === "") return
+      // Searches from history, a suggestion or IPC show their words too.
+      if (!searchField.activeFocus) searchField.text = root.service.query
       root.view = "results"
       root.cursor = 0
       listFlick.contentY = 0
     }
     function onSuggestionsChanged() { root.suggestCursor = -1 }
+    // New results (another filter, a retry) start at the top.
+    function onResultsChanged() {
+      if (root.view !== "results") return
+      listFlick.contentY = 0
+      root.cursor = root.service.results.length > 0 ? 0 : -1
+    }
   }
 
   Timer {
@@ -264,6 +299,9 @@ Panel {
         else if (t === "n") root.service.next()
         else if (t === "b") root.service.previous()
         else if (t === "a") root.addSelected()
+        else if (t === "f") root.setFilter(Model.nextSearchFilter(root.service.searchFilter))
+        else if (t === "c") root.clearResults()
+        else if (t === "d") root.takeSpellingFix()
         else if (t === "q") root.cycleView()
         else if (t >= "1" && t <= "4") root.setView(root.views[Number(t) - 1])
       }
@@ -399,11 +437,33 @@ Panel {
         TextField {
           id: searchField
           width: parent.width
-          placeholderText: "Search songs  ( / )"
+          placeholderText: "Search songs, artists or videos  ( / )"
           foreground: root.fg
           font.family: root.fontFamily
           maximumLength: 200
+          rightPadding: Style.spacing.controlPaddingX + Style.space(26)
           onTextChanged: if (activeFocus) suggestDebounce.restart()
+
+          // Clears the box and the results in one click.
+          PlainText {
+            id: clearGlyph
+            anchors.right: parent.right
+            anchors.rightMargin: Style.spacing.controlPaddingX
+            anchors.verticalCenter: parent.verticalCenter
+            visible: searchField.text !== "" || (root.service !== null && (root.service.query !== "" || root.service.results.length > 0))
+            text: "󰅖"
+            font.pixelSize: Style.font.body
+            color: clearGlyphMouse.containsMouse ? Style.hoverStateColor(root.fg, Color.accent) : root.dim
+
+            MouseArea {
+              id: clearGlyphMouse
+              anchors.fill: parent
+              anchors.margins: -Style.space(6)
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.clearResults()
+            }
+          }
 
           Keys.onPressed: function(event) {
             if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
@@ -483,6 +543,76 @@ Panel {
           }
         }
 
+        // ---- What the search covers, plus YouTube's spelling fix.
+        Item {
+          width: parent.width
+          height: filters.implicitHeight
+          visible: root.view === "results"
+
+          ButtonGroup {
+            id: filters
+            anchors.left: parent.left
+            focusable: false
+            spacing: Style.space(6)
+            foreground: root.fg
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            value: root.service ? root.service.searchFilter : "all"
+            options: [
+              { value: "all", label: "All", tooltip: "Top result, songs and videos (f)" },
+              { value: "songs", label: "Songs", tooltip: "Official releases only (f)" },
+              { value: "videos", label: "Videos", tooltip: "Music videos, live cuts and uploads (f)" }
+            ]
+            onChanged: function(v) { root.setFilter(v) }
+          }
+
+          PlainText {
+            anchors.right: parent.right
+            anchors.verticalCenter: filters.verticalCenter
+            visible: root.service !== null && (root.service.query !== "" || root.service.results.length > 0)
+            text: "CLEAR RESULTS"
+            color: clearResultsMouse.containsMouse ? Style.hoverStateColor(root.fg, Color.accent) : root.dim
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 1
+
+            MouseArea {
+              id: clearResultsMouse
+              anchors.fill: parent
+              anchors.margins: -Style.space(4)
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.clearResults()
+            }
+          }
+        }
+
+        PlainText {
+          width: parent.width
+          visible: root.view === "results" && text !== ""
+          wrapMode: Text.Wrap
+          elide: Text.ElideNone
+          maximumLineCount: 2
+          font.pixelSize: Style.font.bodySmall
+          color: spellingMouse.enabled && spellingMouse.containsMouse ? Style.hoverStateColor(root.fg, Color.accent) : root.fg
+          font.underline: spellingMouse.enabled && spellingMouse.containsMouse
+          text: {
+            var sv = root.service
+            if (!sv || sv.searching) return ""
+            if (sv.didYouMean !== "") return "Did you mean “" + sv.didYouMean + "”?  Press d or click to search it."
+            if (sv.showingFor !== "") return "Showing results for “" + sv.showingFor + "”."
+            return ""
+          }
+
+          MouseArea {
+            id: spellingMouse
+            anchors.fill: parent
+            enabled: root.service !== null && root.service.didYouMean !== ""
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.takeSpellingFix()
+          }
+        }
+
         // ---- List header: what this list is, and tabs for the others.
         Item {
           width: parent.width
@@ -510,8 +640,13 @@ Panel {
                 return "OFFLINE · " + n + (n === 1 ? " SONG" : " SONGS") + (size ? " · " + size.toUpperCase() : "") + (sv.caching ? " · SAVING" : "")
               }
               if (root.view === "history") return "RECENT SEARCHES · " + sv.history.length
-              if (sv.searching) return "SEARCHING"
-              return "RESULTS · " + sv.results.length + " SONGS"
+              if (sv.searching) return "SEARCHING YOUTUBE MUSIC"
+              if (sv.query === "") return "RESULTS"
+              n = sv.results.length
+              var noun = sv.searchFilter === "songs" ? (n === 1 ? " SONG" : " SONGS")
+                : sv.searchFilter === "videos" ? (n === 1 ? " VIDEO" : " VIDEOS")
+                : (n === 1 ? " RESULT" : " RESULTS")
+              return n + noun
             }
           }
 
@@ -558,9 +693,10 @@ Panel {
             var sv = root.service
             if (!sv) return ""
             if (root.view === "results") {
-              if (sv.searching) return "Asking YouTube Music…"
+              if (sv.searching && sv.results.length === 0) return "Asking YouTube Music…"
+              if (sv.searching) return ""
               if (sv.searchError !== "") return sv.searchError
-              if (sv.results.length === 0) return "Press / and type a song or an artist."
+              if (sv.results.length === 0) return "Type a song, an artist or both, then press enter. Press / to start typing."
               return ""
             }
             if (root.view === "cached") {
@@ -590,6 +726,9 @@ Panel {
           clip: true
           boundsBehavior: Flickable.StopAtBounds
           interactive: contentHeight > height
+          // The previous results stay put, dimmed, until the new ones land.
+          opacity: root.view === "results" && root.service && root.service.searching ? 0.45 : 1
+          Behavior on opacity { NumberAnimation { duration: 120 } }
 
           Column {
             id: rowColumn
@@ -630,7 +769,9 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   width: Style.space(18)
                   text: root.view === "history" ? "󰋚"
-                    : row.current ? (root.service && root.service.playing ? "󰝚" : "󰏤") : ""
+                    : row.current ? (root.service && root.service.playing ? "󰝚" : "󰏤")
+                    : row.modelData.kind === "video" ? "󰕧" : ""
+                  color: row.current || root.view === "history" ? root.fg : root.dim
                   font.pixelSize: Style.font.body
                 }
 
@@ -651,9 +792,14 @@ Panel {
                   PlainText {
                     width: parent.width
                     visible: text !== ""
-                    text: row.modelData.album && row.modelData.album !== row.modelData.title
-                      ? (row.modelData.artist || "") + " · " + row.modelData.album
-                      : (row.modelData.artist || "")
+                    text: {
+                      var m = row.modelData
+                      var parts = []
+                      if (m.kind === "video" && root.view !== "history") parts.push("Video")
+                      if (m.artist) parts.push(m.artist)
+                      if (m.album && m.album !== m.title && m.album !== m.artist) parts.push(m.album)
+                      return parts.join(" · ")
+                    }
                     color: root.dim
                     font.pixelSize: Style.font.caption
                   }
@@ -711,10 +857,12 @@ Panel {
         PlainText {
           width: parent.width
           horizontalAlignment: Text.AlignHCenter
+          wrapMode: Text.Wrap
+          elide: Text.ElideNone
           color: root.dim
           font.pixelSize: Style.font.caption
           text: {
-            if (root.view === "results") return "/ search (↓↑ pick · tab complete) · enter play + radio · a add to queue · q next list · esc close"
+            if (root.view === "results") return "/ search · f filter · c clear · enter play + radio · a queue · q next list"
             if (root.view === "cached") return "enter play offline · a add to queue · q next list · esc close"
             if (root.view === "history") return "enter search again · x forget · q next list · esc close"
             return "enter play · x remove · p pause · m mute · n next · b back · h/l seek · q next list"

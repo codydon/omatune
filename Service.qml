@@ -48,6 +48,12 @@ Item {
   property bool searching: false
   property string searchError: ""
   property int searchToken: 0
+  // "all" (top result, songs and videos), "songs" or "videos".
+  property string searchFilter: "all"
+  // YouTube's spelling fix for the last search: a query to offer, or the
+  // one it already searched instead.
+  property string didYouMean: ""
+  property string showingFor: ""
 
   // ---- Search suggestions (best effort: failures clear, never error)
   property var suggestions: []
@@ -123,24 +129,45 @@ Item {
 
   // ---------------------------------------------------------------- search
 
-  function search(text) {
+  function search(text, filter) {
     // Same bounds for the panel and for IPC callers.
     var q = String(text || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 200)
-    if (q === "") { results = []; searchError = ""; return }
+    if (q === "") { clearSearch(); return }
+    var f = Model.searchFilter(filter === undefined ? searchFilter : filter)
     query = q
+    searchFilter = f
     searching = true
     searchError = ""
+    didYouMean = ""
+    showingFor = ""
     var token = ++searchToken
-    runBackend(["search", q], function(reply) {
+    runBackend(["search", q, f], function(reply) {
       if (token !== root.searchToken) return
       root.searching = false
       if (!reply.ok) { root.searchError = reply.error; root.results = []; return }
       root.meta = Model.rememberTracks(root.meta, reply.tracks)
       root.results = reply.tracks
-      if (reply.tracks.length === 0) root.searchError = "No songs matched “" + Model.plain(q, 60) + "”. Try fewer words."
+      root.didYouMean = reply.didYouMean || ""
+      root.showingFor = reply.showingFor || ""
+      if (reply.tracks.length === 0) root.searchError = root.noMatches(q, f)
       else root.rememberSearch(q)
     })
     suggestions = []
+  }
+
+  function noMatches(q, f) {
+    var shown = "“" + Model.plain(q, 60) + "”"
+    if (f === "songs") return "No songs matched " + shown + ". Some tracks are only on YouTube as videos, so try All or Videos."
+    if (f === "videos") return "No videos matched " + shown + ". Try All, or fewer words."
+    return "Nothing matched " + shown + ". Check the spelling, or try just the song or artist name."
+  }
+
+  // Changing the filter re-runs the current search under it.
+  function setSearchFilter(filter) {
+    var f = Model.searchFilter(filter)
+    if (f === searchFilter) return
+    searchFilter = f
+    if (query !== "") search(query, f)
   }
 
   // Autocomplete for the search box. Same bounds as search, but failures
@@ -181,10 +208,17 @@ Item {
 
   function clearSearch() {
     searchToken++
+    suggestToken++
     searching = false
     results = []
     searchError = ""
+    didYouMean = ""
+    showingFor = ""
+    suggestions = []
     query = ""
+    // A fresh start searches everything again, so a narrowed filter can't
+    // quietly hide the next song.
+    searchFilter = "all"
   }
 
   // ---------------------------------------------------------------- queue
@@ -548,7 +582,7 @@ Item {
         root.pending = []
         root.lastError = playerProc.running
           ? "The player started but never answered. Stop it, then play the song again."
-          : "Couldn't start the player. Check that mpv is installed (omarchy pkg add mpv), then try again."
+          : "Couldn't start the player. Check that the mpv package is installed, then try again."
         if (playerProc.running) root.stop()
         return
       }

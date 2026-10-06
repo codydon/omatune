@@ -76,7 +76,9 @@ function cleanTrack(raw) {
     title: plain(raw.title, MAX_TITLE) || raw.id,
     artist: plain(raw.artist, MAX_ARTIST),
     album: plain(raw.album, MAX_ARTIST),
-    duration: duration
+    duration: duration,
+    // Search marks music videos; everything else is shown as a song.
+    kind: raw.kind === "video" ? "video" : "song"
   }
 }
 
@@ -104,11 +106,29 @@ function cleanTracks(list, max) {
   return tracks
 }
 
-// search / radio: { ok, tracks }
+// search / radio: { ok, tracks }. Search may add YouTube's spelling fix:
+// didYouMean (a query worth offering) or showingFor (already applied).
 function parseReply(text) {
   var r = parseJsonReply(text)
   if (!r.ok) return r
-  return { ok: true, tracks: cleanTracks(r.data.tracks, MAX_TRACKS) }
+  return {
+    ok: true,
+    tracks: cleanTracks(r.data.tracks, MAX_TRACKS),
+    didYouMean: typeof r.data.didYouMean === "string" ? plain(r.data.didYouMean, 200).trim() : "",
+    showingFor: typeof r.data.showingFor === "string" ? plain(r.data.showingFor, 200).trim() : ""
+  }
+}
+
+// What a search covers. "all" is YouTube's top result plus songs and
+// videos; the other two narrow it to one kind.
+var SEARCH_FILTERS = ["all", "songs", "videos"]
+
+function searchFilter(value) {
+  return SEARCH_FILTERS.indexOf(value) >= 0 ? value : "all"
+}
+
+function nextSearchFilter(value) {
+  return SEARCH_FILTERS[(SEARCH_FILTERS.indexOf(searchFilter(value)) + 1) % SEARCH_FILTERS.length]
 }
 
 // history-*: { ok, history: [query, …] }
@@ -276,6 +296,7 @@ function buildQueue(playlist, meta, cacheDir) {
       artist: known ? known.artist : "",
       album: known ? known.album : "",
       duration: known ? known.duration : "",
+      kind: known && known.kind === "video" ? "video" : "song",
       current: entry.current === true
     })
   }
@@ -330,6 +351,7 @@ if (typeof module !== "undefined") {
     cleanTrack: cleanTrack, parseReply: parseReply, displayTitle: displayTitle,
     utf8Length: utf8Length, loadfileCommand: loadfileCommand, rememberTracks: rememberTracks,
     buildQueue: buildQueue, radioAdditions: radioAdditions, formatTime: formatTime,
-    clampIndex: clampIndex, playbackError: playbackError
+    clampIndex: clampIndex, playbackError: playbackError,
+    SEARCH_FILTERS: SEARCH_FILTERS, searchFilter: searchFilter, nextSearchFilter: nextSearchFilter
   }
 }

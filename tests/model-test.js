@@ -179,4 +179,31 @@ test("formatBytes", () => {
   assert.equal(M.formatBytes(-1), "")
 })
 
+test("search replies keep the track kind and YouTube's spelling fix, cleaned", () => {
+  const r = M.parseReply(JSON.stringify({ ok: true, didYouMean: "zero <sugar>\u202e", showingFor: 5, tracks: [
+    { id: "vdEMvr-vpdI", kind: "video", title: "Otero (Audio)", artist: "Zzero Sufuri", duration: "3:48" },
+    { id: "wU26xVT_vBU", kind: "<script>", title: "One More Time" }
+  ] }))
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.tracks.map(t => t.kind), ["video", "song"])
+  assert.equal(r.didYouMean, "zero sugar")
+  assert.equal(r.showingFor, "")
+  assert.equal(M.parseReply('{"ok":true,"tracks":[]}').didYouMean, "")
+})
+
+test("search filters cycle all, songs, videos and reject anything else", () => {
+  assert.equal(M.searchFilter("videos"), "videos")
+  assert.equal(M.searchFilter("--rm"), "all")
+  assert.equal(M.nextSearchFilter("all"), "songs")
+  assert.equal(M.nextSearchFilter("songs"), "videos")
+  assert.equal(M.nextSearchFilter("videos"), "all")
+  assert.equal(M.nextSearchFilter(undefined), "songs")
+})
+
+test("the queue remembers which entries are videos", () => {
+  const meta = M.rememberTracks(Object.create(null), [{ id: "vdEMvr-vpdI", title: "Otero", kind: "video" }])
+  const rows = M.buildQueue([{ filename: M.watchUrl("vdEMvr-vpdI") }, { filename: M.watchUrl("wU26xVT_vBU") }], meta)
+  assert.deepEqual(rows.map(r => r.kind), ["video", "song"])
+})
+
 console.log(`model-test: ${passed} passed`)
